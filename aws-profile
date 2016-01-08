@@ -1,0 +1,161 @@
+#!/usr/bin/env python
+
+# This is a hack to setup environment variables for using Assume Role with other scripts that
+# use them. AWS has a standard way of doing this, found here:
+#
+# http://docs.aws.amazon.com/cli/latest/topic/config-vars.html#using-aws-iam-roles
+#
+# This will work with any newer AWS SDK, but for older ones, it will not. This script is a work-around,
+# utilizing the same config file options that the above uses, but to call for ourselves and setup
+# environment variables as we need.
+#
+# Much code has been borrowed from:
+#
+# https://github.com/aws/aws-cli/blob/cba353fb6e6a4be8404fa909eb15a83bf1ce7843/awscli/customizations/assumerole.py
+
+import os
+import sys
+import json
+import time
+
+from dateutil.parser import parse
+from dateutil.tz import tzlocal
+from datetime import datetime
+
+from boto.sts import STSConnection
+import botocore.session
+
+CACHE_DIR = os.path.expanduser(os.path.join('~', '.aws', 'aws-profile', 'cache'))
+EXPIRY_WINDOW_SECONDS = 900
+
+
+def parse_args(argv=sys.argv):
+    if len(argv) < 3:
+        print("Please provide the name of the profile to connect with, and the command to run.")
+        print("Example: %s profile 'aws s3 ls'" % os.path.basename(argv[0]))
+        quit(1)
+
+    profile = argv[1]
+    command = " ".join(argv[2:])
+    return (profile, command)
+
+
+def read_config():
+    # This reads our config files automatically, and combines config and credentials files for us
+    profiles = botocore.session.get_session().full_config.get('profiles', {})
+
+    # Checks for the passed in profile, mostly for sanity
+    if profile not in profiles:
+        print "Profile '%s' does not exist in the config file." % profile
+        quit(2)
+
+    if 'role_arn' not in profiles[profile] or 'source_profile' not in profiles[profile]:
+        print "Profile '%s' does not have role_arn or source_profile set." % profile
+        quit(3)
+
+    source = profiles[profile]['source_profile']
+
+    # Verify the source profile is correctly setup
+    if 'aws_access_key_id' not in profiles[source] or 'aws_secret_access_key' not in profiles[source]:
+        print "Profile '%s' does not have the api keys necessary for assuming a role." % source
+        quit(4)
+
+    return profiles[profile]
+
+
+def load_creds_from_cache(key_path):
+    try:
+        with open(key_path) as f:
+            return json.load(f)
+    except (OSError, ValueError, IOError):
+        # This is fine, just means we will use STS to pull new keys
+        return None
+
+
+def save_creds_to_cache(key_path, creds):
+    file_content = json.dumps(creds)
+    if not os.path.isdir(os.path.dirname(key_path)):
+        os.makedirs(os.path.dirname(key_path))
+    with os.fdopen(os.open(key_path, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as f:
+        f.write(file_content)
+
+
+def create_cache_key(config):
+    role_arn = config['role_arn'].replace(':', '_')
+    role_session_name = config.get('role_session_name')
+    if role_session_name:
+        cache_key = '%s--%s--%s' % (profile, role_arn, role_session_name)
+    else:
+        cache_key = '%s--%s' % (profile, role_arn)
+
+    return cache_key.replace('/', '-')
+
+
+def get_creds_from_sts(key_path):
+    # Generates our new set of credentials to use on the command line.
+    # Duration is as low as possibly (15 minutes) as cli things shouldn't run for
+    # Longer than that, and the max is 1 hour anyway
+    sts_connection = STSConnection(profile_name=config['source_profile'])
+    role_session_name = config.get('role_session_name')
+    if not role_session_name:
+        role_session_name = 'AWS-Profile-session-%s' % (int(time.time()))
+
+    assumedRoleObject = sts_connection.assume_role(
+        role_arn=config['role_arn'],
+        role_session_name=role_session_name,
+        duration_seconds=900,
+    )
+
+    creds = {
+        'access_key': assumedRoleObject.credentials.access_key,
+        'secret_key': assumedRoleObject.credentials.secret_key,
+        'session_token': assumedRoleObject.credentials.session_token,
+        'expiration': assumedRoleObject.credentials.expiration,
+    }
+
+    # Save the creds to the cache file
+    save_creds_to_cache(key_path, creds)
+
+    return creds
+
+
+def is_creds_valid(creds):
+    end_time = parse(creds['expiration'])
+    now = datetime.now(tzlocal())
+    return now <= end_time
+
+
+def load_creds():
+    cache_key = create_cache_key(config)
+    full_path = os.path.join(CACHE_DIR, cache_key + '.json')
+
+    creds = load_creds_from_cache(full_path)
+    if creds is None or not is_creds_valid(creds):
+        creds = get_creds_from_sts(full_path)
+    return creds
+
+
+# Start Main Script
+
+profile, command = parse_args()
+config = read_config()
+creds = load_creds()
+
+# Unset variables for sanity sake
+os.unsetenv('AWS_ACCESS_KEY_ID')
+os.unsetenv('AWS_SECRET_ACCESS_KEY')
+os.unsetenv('AWS_SESSION_TOKEN')
+os.unsetenv('AWS_DEFAULT_PROFILE')
+os.unsetenv('AWS_PROFILE')
+
+if 'region' in config:
+    os.putenv('AWS_DEFAULT_REGION', config['region'])
+    os.putenv('AWS_REGION', config['region'])
+
+os.putenv('AWS_ACCESS_KEY_ID', creds['access_key'])
+os.putenv('AWS_SECRET_ACCESS_KEY', creds['secret_key'])
+os.putenv('AWS_SESSION_TOKEN', creds['session_token'])
+
+my_env = os.environ.copy()
+command_status = os.system(command)
+exit(os.WEXITSTATUS(command_status))
