@@ -27,6 +27,7 @@ import botocore.session
 
 CACHE_DIR = os.path.expanduser(os.path.join('~', '.aws', 'aws-profile', 'cache'))
 EXPIRY_WINDOW_SECONDS = 900
+EXPIRY_GRACE_SECONDS = 300
 
 
 def parse_args(argv=sys.argv):
@@ -122,7 +123,7 @@ def get_creds_from_sts(key_path):
 def is_creds_valid(creds):
     end_time = parse(creds['expiration'])
     now = datetime.now(tzlocal())
-    return now <= end_time
+    return (end_time - now).total_seconds() > EXPIRY_GRACE_SECONDS
 
 
 def load_creds():
