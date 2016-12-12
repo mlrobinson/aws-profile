@@ -103,7 +103,7 @@ def get_creds_from_sts(key_path):
     assumedRoleObject = sts_connection.assume_role(
         role_arn=config['role_arn'],
         role_session_name=role_session_name,
-        duration_seconds=900,
+        duration_seconds=EXPIRY_WINDOW_SECONDS,
     )
 
     creds = {
