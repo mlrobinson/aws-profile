@@ -101,10 +101,14 @@ def get_creds_from_sts(key_path):
     if not role_session_name:
         role_session_name = 'AWS-Profile-session-%s' % (int(time.time()))
 
+    mfa_TOTP = raw_input("Enter the MFA code: ")
+
     assumedRoleObject = sts_connection.assume_role(
         role_arn=config['role_arn'],
         role_session_name=role_session_name,
         duration_seconds=EXPIRY_WINDOW_SECONDS,
+        mfa_serial_number="arn:aws:iam::540757378086:mfa/simonvc",
+        mfa_token=mfa_TOTP
     )
 
     creds = {
