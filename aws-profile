@@ -108,7 +108,7 @@ def get_creds_from_sts(key_path):
             role_arn=config['role_arn'],
             role_session_name=role_session_name,
             duration_seconds=EXPIRY_WINDOW_SECONDS,
-            mfa_serial_number=config['mfa'],
+            mfa_serial_number=config['mfa_serial'],
             mfa_token=mfa_TOTP
         )
     else:
